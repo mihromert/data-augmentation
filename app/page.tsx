@@ -2,12 +2,13 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 
-type YoloBox = {
+type AnnotationFormat = "bbox" | "obb";
+
+type Point = [number, number];
+
+type YoloAnnotation = {
   classId: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+  points: Point[];
 };
 
 type DatasetImage = {
@@ -100,50 +101,78 @@ function makeTransform(settings: AugmentSettings, seed: number): GeneratedTransf
   };
 }
 
-function parseYoloLabels(text: string): YoloBox[] {
+function boxPoints(x: number, y: number, width: number, height: number): Point[] {
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  return [
+    [x - halfWidth, y - halfHeight],
+    [x + halfWidth, y - halfHeight],
+    [x + halfWidth, y + halfHeight],
+    [x - halfWidth, y + halfHeight],
+  ];
+}
+
+function annotationBounds(points: Point[]) {
+  return {
+    minX: Math.min(...points.map(([x]) => x)),
+    maxX: Math.max(...points.map(([x]) => x)),
+    minY: Math.min(...points.map(([, y]) => y)),
+    maxY: Math.max(...points.map(([, y]) => y)),
+  };
+}
+
+function parseYoloLabels(text: string, format: AnnotationFormat): YoloAnnotation[] {
   return text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .flatMap((line) => {
       const values = line.split(/\s+/).map(Number);
-      if (values.length < 5 || values.some((value) => !Number.isFinite(value))) {
+      const expectedValues = format === "obb" ? 9 : 5;
+      if (values.length !== expectedValues || values.some((value) => !Number.isFinite(value))) {
         return [];
       }
-      const [classId, x, y, width, height] = values;
-      if (width <= 0 || height <= 0) return [];
-      return [{ classId, x, y, width, height }];
+      const classId = values[0];
+      const points: Point[] = format === "obb"
+        ? [
+            [values[1], values[2]],
+            [values[3], values[4]],
+            [values[5], values[6]],
+            [values[7], values[8]],
+          ]
+        : boxPoints(values[1], values[2], values[3], values[4]);
+      const { minX, maxX, minY, maxY } = annotationBounds(points);
+      if (maxX - minX <= 0 || maxY - minY <= 0) return [];
+      return [{ classId, points }];
     });
 }
 
-function formatYoloLabels(boxes: YoloBox[]) {
-  return boxes
-    .map(
-      (box) =>
-        `${box.classId} ${box.x.toFixed(6)} ${box.y.toFixed(6)} ${box.width.toFixed(6)} ${box.height.toFixed(6)}`,
-    )
-    .join("\n");
+function formatYoloLabels(annotations: YoloAnnotation[], format: AnnotationFormat) {
+  return annotations.map((annotation) => {
+    if (format === "obb") {
+      const coordinates = annotation.points
+        .flatMap(([x, y]) => [x, y])
+        .map((value) => value.toFixed(6));
+      return `${annotation.classId} ${coordinates.join(" ")}`;
+    }
+    const { minX, maxX, minY, maxY } = annotationBounds(annotation.points);
+    return `${annotation.classId} ${((minX + maxX) / 2).toFixed(6)} ${((minY + maxY) / 2).toFixed(6)} ${(maxX - minX).toFixed(6)} ${(maxY - minY).toFixed(6)}`;
+  }).join("\n");
 }
 
 function transformBoxes(
-  boxes: YoloBox[],
+  annotations: YoloAnnotation[],
   transform: GeneratedTransform,
   imageWidth: number,
   imageHeight: number,
-): YoloBox[] {
+  format: AnnotationFormat,
+): YoloAnnotation[] {
   const radians = (transform.angle * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
 
-  return boxes.flatMap((box) => {
-    const halfWidth = box.width / 2;
-    const halfHeight = box.height / 2;
-    const corners = [
-      [box.x - halfWidth, box.y - halfHeight],
-      [box.x + halfWidth, box.y - halfHeight],
-      [box.x + halfWidth, box.y + halfHeight],
-      [box.x - halfWidth, box.y + halfHeight],
-    ].map(([rawX, rawY]) => {
+  return annotations.flatMap((annotation) => {
+    const transformedPoints: Point[] = annotation.points.map(([rawX, rawY]) => {
       // Canvas rotates in pixel space. Rotating normalized coordinates directly
       // only works for square images and distorts boxes on other aspect ratios.
       let centeredX = (rawX - 0.5) * imageWidth;
@@ -153,13 +182,15 @@ function transformBoxes(
       return [
         (centeredX * cos - centeredY * sin) / imageWidth + 0.5,
         (centeredX * sin + centeredY * cos) / imageHeight + 0.5,
-      ];
+      ] as Point;
     });
 
-    const rawMinX = Math.min(...corners.map(([x]) => x));
-    const rawMaxX = Math.max(...corners.map(([x]) => x));
-    const rawMinY = Math.min(...corners.map(([, y]) => y));
-    const rawMaxY = Math.max(...corners.map(([, y]) => y));
+    const {
+      minX: rawMinX,
+      maxX: rawMaxX,
+      minY: rawMinY,
+      maxY: rawMaxY,
+    } = annotationBounds(transformedPoints);
     const minX = Math.max(0, rawMinX);
     const maxX = Math.min(1, rawMaxX);
     const minY = Math.max(0, rawMinY);
@@ -170,15 +201,13 @@ function transformBoxes(
       return [];
     }
 
-    return [
-      {
-        classId: box.classId,
-        x: (minX + maxX) / 2,
-        y: (minY + maxY) / 2,
-        width,
-        height,
-      },
-    ];
+    const points = format === "obb"
+      ? transformedPoints.map(([x, y]) => [
+          Math.max(0, Math.min(1, x)),
+          Math.max(0, Math.min(1, y)),
+        ] as Point)
+      : boxPoints((minX + maxX) / 2, (minY + maxY) / 2, width, height);
+    return [{ classId: annotation.classId, points }];
   });
 }
 
@@ -229,25 +258,33 @@ async function loadImage(file: File): Promise<HTMLImageElement> {
 
 function drawBoxes(
   context: CanvasRenderingContext2D,
-  boxes: YoloBox[],
+  annotations: YoloAnnotation[],
   classes: string[],
   width: number,
   height: number,
+  format: AnnotationFormat,
 ) {
   const lineWidth = Math.max(2, Math.round(Math.min(width, height) / 260));
   context.font = `600 ${Math.max(12, Math.round(Math.min(width, height) / 35))}px ui-monospace, monospace`;
   context.textBaseline = "bottom";
-  boxes.forEach((box) => {
-    const color = BOX_COLORS[box.classId % BOX_COLORS.length];
-    const left = (box.x - box.width / 2) * width;
-    const top = (box.y - box.height / 2) * height;
-    const boxWidth = box.width * width;
-    const boxHeight = box.height * height;
+  annotations.forEach((annotation) => {
+    const color = BOX_COLORS[annotation.classId % BOX_COLORS.length];
+    const { minX, minY } = annotationBounds(annotation.points);
+    const left = minX * width;
+    const top = minY * height;
     context.strokeStyle = color;
     context.lineWidth = lineWidth;
-    context.strokeRect(left, top, boxWidth, boxHeight);
+    context.beginPath();
+    annotation.points.forEach(([x, y], index) => {
+      const pixelX = x * width;
+      const pixelY = y * height;
+      if (index === 0) context.moveTo(pixelX, pixelY);
+      else context.lineTo(pixelX, pixelY);
+    });
+    context.closePath();
+    context.stroke();
 
-    const label = classes[box.classId] ?? `class ${box.classId}`;
+    const label = classes[annotation.classId] ?? `class ${annotation.classId}`;
     const textWidth = context.measureText(label).width;
     const labelHeight = Math.max(18, Math.round(Math.min(width, height) / 25));
     const labelTop = Math.max(0, top - labelHeight);
@@ -255,6 +292,15 @@ function drawBoxes(
     context.fillRect(left, labelTop, textWidth + 12, labelHeight);
     context.fillStyle = "#10201c";
     context.fillText(label, left + 6, labelTop + labelHeight - 3);
+
+    if (format === "obb") {
+      context.fillStyle = color;
+      annotation.points.forEach(([x, y]) => {
+        context.beginPath();
+        context.arc(x * width, y * height, lineWidth * 1.35, 0, Math.PI * 2);
+        context.fill();
+      });
+    }
   });
 }
 
@@ -275,11 +321,12 @@ function applyNoise(context: CanvasRenderingContext2D, width: number, height: nu
 
 function renderAugmentation(
   image: HTMLImageElement,
-  boxes: YoloBox[],
+  annotations: YoloAnnotation[],
   transform: GeneratedTransform,
   withOverlay: boolean,
   classes: string[],
   seed: number,
+  format: AnnotationFormat,
 ) {
   const canvas = document.createElement("canvas");
   canvas.width = image.naturalWidth;
@@ -304,13 +351,14 @@ function renderAugmentation(
   applyNoise(context, canvas.width, canvas.height, transform.noise, seed);
 
   const transformedBoxes = transformBoxes(
-    boxes,
+    annotations,
     transform,
     canvas.width,
     canvas.height,
+    format,
   );
   if (withOverlay) {
-    drawBoxes(context, transformedBoxes, classes, canvas.width, canvas.height);
+    drawBoxes(context, transformedBoxes, classes, canvas.width, canvas.height, format);
   }
   return { canvas, boxes: transformedBoxes };
 }
@@ -392,6 +440,7 @@ export default function Home() {
   const [images, setImages] = useState<DatasetImage[]>([]);
   const [classes, setClasses] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [annotationFormat, setAnnotationFormat] = useState<AnnotationFormat>("bbox");
   const [settings, setSettings] = useState(defaultSettings);
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewMode, setPreviewMode] = useState<"original" | "augmented">("original");
@@ -420,12 +469,17 @@ export default function Home() {
   }, [images]);
 
   const renderPreview = useCallback(
-    async (mode: "original" | "augmented", seed = previewSeed, imageIndex = selectedIndex) => {
+    async (
+      mode: "original" | "augmented",
+      seed = previewSeed,
+      imageIndex = selectedIndex,
+      format = annotationFormat,
+    ) => {
       const item = images[imageIndex];
       if (!item) return;
       try {
         const image = await loadImage(item.file);
-        const boxes = item.labelFile ? parseYoloLabels(await item.labelFile.text()) : [];
+        const boxes = item.labelFile ? parseYoloLabels(await item.labelFile.text(), format) : [];
         const transform =
           mode === "original"
             ? {
@@ -447,6 +501,7 @@ export default function Home() {
           true,
           classes,
           seed,
+          format,
         );
         const blob = await canvasToBlob(canvas, "image/jpeg", 0.9);
         const nextUrl = URL.createObjectURL(blob);
@@ -459,7 +514,7 @@ export default function Home() {
         setError(caught instanceof Error ? caught.message : "Could not render preview.");
       }
     },
-    [classes, images, previewSeed, selectedIndex, settings],
+    [annotationFormat, classes, images, previewSeed, selectedIndex, settings],
   );
 
   async function chooseDataset() {
@@ -514,7 +569,7 @@ export default function Home() {
       setSelectedIndex(0);
       setPreviewSeed(8241);
       setStatus(`Ready — ${discovered.length} images found.`);
-      setTimeout(() => void renderInitial(discovered, classNames), 0);
+      setTimeout(() => void renderInitial(discovered, classNames, annotationFormat), 0);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") {
         setStatus("Folder selection cancelled.");
@@ -527,10 +582,14 @@ export default function Home() {
     }
   }
 
-  async function renderInitial(discovered: DatasetImage[], classNames: string[]) {
+  async function renderInitial(
+    discovered: DatasetImage[],
+    classNames: string[],
+    format: AnnotationFormat,
+  ) {
     const item = discovered[0];
     const image = await loadImage(item.file);
-    const boxes = item.labelFile ? parseYoloLabels(await item.labelFile.text()) : [];
+    const boxes = item.labelFile ? parseYoloLabels(await item.labelFile.text(), format) : [];
     const identity: GeneratedTransform = {
       angle: 0,
       flipX: false,
@@ -542,7 +601,7 @@ export default function Home() {
       blur: 0,
       noise: 0,
     };
-    const { canvas } = renderAugmentation(image, boxes, identity, true, classNames, 1);
+    const { canvas } = renderAugmentation(image, boxes, identity, true, classNames, 1, format);
     const blob = await canvasToBlob(canvas, "image/jpeg", 0.9);
     const url = URL.createObjectURL(blob);
     setPreviewUrl((current) => {
@@ -555,6 +614,13 @@ export default function Home() {
   async function selectImage(index: number) {
     setSelectedIndex(index);
     await renderPreview(previewMode, previewSeed, index);
+  }
+
+  function changeAnnotationFormat(format: AnnotationFormat) {
+    setAnnotationFormat(format);
+    if (images.length) {
+      void renderPreview(previewMode, previewSeed, selectedIndex, format);
+    }
   }
 
   async function shufflePreview() {
@@ -603,7 +669,7 @@ export default function Home() {
         if (cancelRef.current) break;
         const item = images[imageIndex];
         const decoded = await loadImage(item.file);
-        const boxes = item.labelFile ? parseYoloLabels(await item.labelFile.text()) : [];
+        const boxes = item.labelFile ? parseYoloLabels(await item.labelFile.text(), annotationFormat) : [];
         const relativeImagePath = item.path.replace(/^(?:.*\/)?images\//i, "");
         const relativeLabelPath = item.labelPath.replace(/^(?:.*\/)?labels\//i, "");
         const imageExt = extension(relativeImagePath);
@@ -622,6 +688,7 @@ export default function Home() {
             false,
             classes,
             seed,
+            annotationFormat,
           );
           const suffix = `_aug_${String(copyIndex + 1).padStart(2, "0")}`;
           const imageBlob = await canvasToBlob(canvas, mimeType, 0.92);
@@ -629,7 +696,7 @@ export default function Home() {
           await writeFile(
             output,
             `labels/${baseLabel}${suffix}.txt`,
-            transformedBoxes.length ? `${formatYoloLabels(transformedBoxes)}\n` : "",
+            transformedBoxes.length ? `${formatYoloLabels(transformedBoxes, annotationFormat)}\n` : "",
           );
           completed += 1;
           setProgress(Math.round((completed / totalOutput) * 100));
@@ -714,6 +781,32 @@ export default function Home() {
 
           <div className="control-group">
             <p className="group-label">OUTPUT</p>
+            <div className="format-control">
+              <span>Input &amp; output annotations</span>
+              <div className="segmented format-options" aria-label="Annotation format">
+                <button
+                  className={annotationFormat === "bbox" ? "active" : ""}
+                  onClick={() => changeAnnotationFormat("bbox")}
+                  disabled={isRunning}
+                  type="button"
+                >
+                  BB standard
+                </button>
+                <button
+                  className={annotationFormat === "obb" ? "active" : ""}
+                  onClick={() => changeAnnotationFormat("obb")}
+                  disabled={isRunning}
+                  type="button"
+                >
+                  OBB corners
+                </button>
+              </div>
+              <small>
+                {annotationFormat === "bbox"
+                  ? "class · center x/y · width · height"
+                  : "class · four normalized corner points"}
+              </small>
+            </div>
             <Slider
               label="Copies per image"
               value={settings.copies}
@@ -912,6 +1005,10 @@ export default function Home() {
               <dd>{classes.length || "—"}</dd>
             </div>
             <div>
+              <dt>Annotation format</dt>
+              <dd>{annotationFormat === "bbox" ? "BB" : "OBB"}</dd>
+            </div>
+            <div>
               <dt>New images</dt>
               <dd>{images.length ? totalOutput : "—"}</dd>
             </div>
@@ -967,7 +1064,7 @@ export default function Home() {
       </section>
 
       <footer>
-        <p>Built for YOLO detection datasets · JPG, PNG, WebP & BMP</p>
+        <p>Built for YOLO BB & OBB datasets · JPG, PNG, WebP & BMP</p>
         <p>Runs entirely on this device</p>
       </footer>
     </main>

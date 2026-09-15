@@ -42,6 +42,8 @@ test("keeps processing local and annotation-aware", async () => {
   assert.match(page, /showDirectoryPicker/);
   assert.match(page, /function transformBoxes/);
   assert.match(page, /function parseYoloLabels/);
+  assert.match(page, /"bbox" \| "obb"/);
+  assert.match(page, /OBB corners/);
   assert.match(page, /getDirectoryHandle\(outputName, \{ create: true \}\)/);
   assert.match(page, /Your original dataset is never changed/);
   assert.doesNotMatch(page, /\bfetch\s*\(/);

@@ -1,8 +1,8 @@
 # Augment Lab
 
 A local graphical application for augmenting YOLO object-detection datasets.
-Images never leave your computer, and geometric augmentations update YOLO
-bounding boxes automatically.
+Images never leave your computer, and geometric augmentations update standard
+YOLO bounding boxes or four-corner YOLO OBB annotations automatically.
 
 ## Supported dataset layout
 
@@ -31,13 +31,16 @@ stops the local app.
 
 ## Workflow
 
-1. Click **Choose dataset folder** and select the folder containing `images/`,
+1. Select **BB standard** (`class cx cy width height`) or **OBB corners**
+   (`class x1 y1 x2 y2 x3 y3 x4 y4`) for the source labels.
+2. Click **Choose dataset folder** and select the folder containing `images/`,
    `labels/`, and `classes.txt`.
-2. Adjust copies, rotation, flips, brightness, contrast, saturation, hue,
+3. Adjust copies, rotation, flips, brightness, contrast, saturation, hue,
    blur, noise, and minimum box visibility.
-3. Inspect **Original** and **Augmented** previews.
-4. Click **Choose output & generate**, then select a parent output folder.
-5. Augment Lab creates a new timestamped YOLO dataset. Originals are untouched.
+4. Inspect **Original** and **Augmented** previews.
+5. Click **Choose output & generate**, then select a parent output folder.
+6. Augment Lab creates a new timestamped YOLO dataset in the selected format.
+   Originals are untouched.
 
 Images without a matching label file are treated as valid background images.
 Malformed YOLO label lines are skipped.

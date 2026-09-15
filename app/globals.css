@@ -323,6 +323,31 @@ h1 {
   padding-bottom: 0;
 }
 
+.format-control {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.format-control > span {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.format-control > small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.format-options {
+  width: 100%;
+}
+
+.format-options button {
+  flex: 1;
+}
+
 .group-label {
   margin-bottom: 18px;
   color: #8b938f;
